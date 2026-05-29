@@ -21,15 +21,22 @@ redocker 通过一个绑定到你自己域名的 Vercel Function,代理 Docker H
 
 ## 快速开始
 
-1. **部署** —— 点上方按钮(或运行 `npx vercel`)。按提示填 `DOCKER_USERNAME` 和 `DOCKER_PASSWORD`(Docker Hub 访问令牌 —— 见[配置](#配置))。
-2. **关闭 Deployment Protection** —— 控制台 → 项目 → *Settings → Deployment Protection → Vercel Authentication → Disabled*。否则 SSO 登录页会挡住 docker 客户端。
-3. **绑定域名** —— *Settings → Domains*,按 Vercel 提示加 DNS(子域 `CNAME → cname.vercel-dns.com`,裸域 `A → 76.76.21.21`)。TLS 自动签发。
-4. **验证**:
+1. **部署** —— 点上方按钮(或运行 `npx vercel`)。一键部署会要求填 `DOCKER_USERNAME` 和 `DOCKER_PASSWORD`(你的 Docker Hub 用户名 + 访问令牌),原因见下方提示。
+2. **绑定域名** —— *Settings → Domains* 添加你的(子)域名,加一条 `CNAME → cname.vercel-dns.com`,TLS 自动签发。
+3. **验证**:
    ```bash
    curl -i https://你的域名/v2/
    # → HTTP/2 401,并带:
    #   www-authenticate: Bearer realm="https://你的域名/v2/auth",service="registry.docker.io"
    ```
+
+> [!IMPORTANT]
+> **redocker 用的是你自己的 Docker Hub 账户。** Vercel 从共享 IP 出站,而 Docker Hub 的匿名拉取限额按 IP 计,常被同一出口 IP 上的其他人占满而 `429`。配置 `DOCKER_USERNAME` + `DOCKER_PASSWORD`(访问令牌)后,拉取会认证为你的账号(认证额度约 200 次 / 6 小时、按账号计),才稳定可用 —— 所以一键部署把这两项设为必填。不配也能跑(匿名),但共享 IP 上很容易被限流。
+>
+> 也正因为它携带你的 Docker Hub 凭据:**这是给你个人用的,不要公开分享代理地址**,否则别人会消耗你账号的额度。建议用一个**不含任何私有仓库的小号**令牌(免费令牌带写/删权限)。
+
+> [!NOTE]
+> 若拉取时返回的是 HTML 登录页而不是 JSON,说明项目开了 **Deployment Protection**(生产环境默认不开);到 *Settings → Deployment Protection* 关掉即可。
 
 ## 使用
 
@@ -73,11 +80,11 @@ docker pull ghcr.你的域名/owner/private-image:tag
 
 ## 配置
 
-所有变量均为可选。在 Vercel 控制台(*Settings → Environment Variables*)或用 `vercel env add` 设置。
+`DOCKER_USERNAME` / `DOCKER_PASSWORD` 在一键部署时填写(见上方说明);其余均为可选。在 Vercel 控制台(*Settings → Environment Variables*)或用 `vercel env add` 调整。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `DOCKER_USERNAME` / `DOCKER_PASSWORD` | — | Docker Hub 用户名 + 访问令牌。认证拉取会把限流算在你账号上,而非 Vercel 共享 IP 的匿名额度。请用**小号** —— 免费令牌带写/删权限。 |
+| `DOCKER_USERNAME` / `DOCKER_PASSWORD` | **必填** | Docker Hub 用户名 + 访问令牌。认证拉取把限流算在你账号上,而非 Vercel 共享 IP 的匿名额度(否则极易 `429`)。请用**小号** —— 免费令牌带写/删权限。 |
 | `BLOB_MODE` | `stream` | `stream` 中转层字节(真加速,耗 Vercel 带宽);`redirect` 把 CDN 的 `307` 还给客户端(省带宽,需客户端能直连 CDN)。 |
 | `EXTRA_REGISTRIES` | — | 前缀路由的额外 registry 主机,逗号分隔。 |
 | `EXTRA_SUBDOMAINS` | — | 额外的 `标签=主机` 子域名映射,逗号分隔。 |

@@ -21,15 +21,22 @@ redocker mirrors Docker Hub and other registries (ghcr.io, quay.io, gcr.io, regi
 
 ## Quick start
 
-1. **Deploy** — click the button above (or run `npx vercel`). When prompted, set `DOCKER_USERNAME` and `DOCKER_PASSWORD` (a Docker Hub access token — see [Configuration](#configuration)).
-2. **Disable Deployment Protection** — dashboard → your project → *Settings → Deployment Protection → Vercel Authentication → Disabled*. Otherwise an SSO page blocks the docker client.
-3. **Add your domain** — *Settings → Domains*, then create the DNS record Vercel shows (`CNAME → cname.vercel-dns.com` for a subdomain, `A → 76.76.21.21` for an apex). TLS is automatic.
-4. **Verify**:
+1. **Deploy** — click the button above (or run `npx vercel`). The one-click flow asks for `DOCKER_USERNAME` and `DOCKER_PASSWORD` (your Docker Hub username + an access token) — see the note below for why.
+2. **Add your domain** — *Settings → Domains*, add your (sub)domain and create a `CNAME → cname.vercel-dns.com`. TLS is automatic.
+3. **Verify**:
    ```bash
    curl -i https://YOUR_DOMAIN/v2/
    # → HTTP/2 401, with:
    #   www-authenticate: Bearer realm="https://YOUR_DOMAIN/v2/auth",service="registry.docker.io"
    ```
+
+> [!IMPORTANT]
+> **redocker uses your own Docker Hub account.** Vercel egresses from shared IPs, and Docker Hub's anonymous pull limit is per-IP — often already exhausted by others on the same IP (`429`). With `DOCKER_USERNAME` + `DOCKER_PASSWORD` (an access token) set, pulls authenticate as your account (~200 per 6h, counted per account), which is what makes it reliable — so the one-click deploy marks them required. (It still runs anonymously without them, but anonymous pulls are easily rate-limited on shared IPs.)
+>
+> Because it carries your Docker Hub credentials, **this is for personal use — don't share the proxy URL publicly**, or others will spend your account's quota. Use a **throwaway account** token (a free token has write/delete scope).
+
+> [!NOTE]
+> If a pull returns an HTML login page instead of JSON, the project has **Deployment Protection** enabled (off by default for Production); turn it off under *Settings → Deployment Protection*.
 
 ## Usage
 
@@ -73,11 +80,11 @@ Subdomain → registry: `ghcr`, `quay`, `gcr`, `k8s`, `mcr`, `ecr`, `gitlab`, `n
 
 ## Configuration
 
-All variables are optional. Set them in the Vercel dashboard (*Settings → Environment Variables*) or with `vercel env add`.
+`DOCKER_USERNAME` / `DOCKER_PASSWORD` are set during the one-click deploy (see the note above); the rest are optional. Adjust them in the Vercel dashboard (*Settings → Environment Variables*) or with `vercel env add`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `DOCKER_USERNAME` / `DOCKER_PASSWORD` | — | Docker Hub username + access token. Authenticated pulls count against your account's rate limit instead of Vercel's shared-IP anonymous bucket. Use a **throwaway account** — a free token has write/delete scope. |
+| `DOCKER_USERNAME` / `DOCKER_PASSWORD` | **required** | Docker Hub username + access token. Authenticated pulls count against your account's rate limit instead of Vercel's shared-IP anonymous bucket (which is easily `429`'d). Use a **throwaway account** — a free token has write/delete scope. |
 | `BLOB_MODE` | `stream` | `stream` proxies layer bytes (real acceleration, uses Vercel bandwidth). `redirect` hands the CDN `307` back to the client (saves bandwidth; the client must be able to reach the CDN). |
 | `EXTRA_REGISTRIES` | — | Extra registry hosts for prefix routing, comma-separated. |
 | `EXTRA_SUBDOMAINS` | — | Extra `label=host` subdomain mappings, comma-separated. |
