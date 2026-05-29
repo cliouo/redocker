@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "node local-server.js",
     "test:flow": "bash test/v2-flow.sh",
-    "test:redirect": "node test/redirect-mode.test.mjs"
+    "test:redirect": "node test/redirect-mode.test.mjs",
+    "test:multi": "node test/multi-registry.test.mjs",
+    "test:unit": "node test/redirect-mode.test.mjs && node test/multi-registry.test.mjs"
   }
 }

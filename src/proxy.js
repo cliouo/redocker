@@ -4,18 +4,39 @@
 // so the exact same module runs on Vercel Edge runtime AND on Node 18+ (for
 // local testing). No Node- or Cloudflare-specific globals.
 //
-// Supported flow (docker pull):
-//   GET /v2/                      -> 401 challenge, realm rewritten to /v2/auth
-//   GET /v2/auth?scope&service    -> token, forwarded to auth.docker.io
-//   GET /v2/<name>/manifests/<r>  -> manifest (incl. multi-arch index)
-//   GET /v2/<name>/blobs/<digest> -> blob, streamed through (307 followed)
-//   /v2/<single-name>/...         -> 301 to /v2/library/<single-name>/...
+// Routing
+//   /v2/                          -> 401 challenge, realm rewritten to /v2/auth
+//   /v2/auth?scope&service        -> token (Docker Hub: known realm + your PAT;
+//                                    other registries: realm discovered by probe)
+//   /v2/<name>/...                -> Docker Hub (single name auto-expands to library/)
+//   /v2/<registry-host>/<repo>/.. -> that registry, e.g. /v2/ghcr.io/owner/img/...
+//                                    (Docker Hub namespaces never contain a dot,
+//                                    so a dotted first segment = explicit registry)
 
 const DEFAULTS = {
   registry: "https://registry-1.docker.io",
   auth: "https://auth.docker.io",
   service: "registry.docker.io",
 };
+
+// Registries reachable via the /v2/<host>/... path prefix. An allowlist (not
+// "any host") so the deployment isn't an open proxy that strangers can point at
+// arbitrary origins to burn your Vercel bandwidth. Extend via EXTRA_REGISTRIES.
+const DEFAULT_REGISTRIES = [
+  "docker.io",
+  "registry-1.docker.io",
+  "ghcr.io",
+  "quay.io",
+  "gcr.io",
+  "registry.k8s.io",
+  "k8s.gcr.io",
+  "mcr.microsoft.com",
+  "public.ecr.aws",
+  "registry.gitlab.com",
+  "nvcr.io",
+];
+// Suffix matches (e.g. Google Artifact Registry regional hosts us-docker.pkg.dev).
+const ALLOWED_SUFFIXES = [".pkg.dev"];
 
 // Hop-by-hop headers must never be forwarded (RFC 7230 §6.1).
 const HOP_BY_HOP = new Set([
@@ -30,10 +51,44 @@ const HOP_BY_HOP = new Set([
 ]);
 
 // Request headers we never forward upstream.
-const DROP_REQUEST_HEADERS = new Set(["host", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-for", "x-vercel-id", "x-vercel-deployment-url", "x-vercel-forwarded-for"]);
+const DROP_REQUEST_HEADERS = new Set([
+  "host",
+  "x-forwarded-host",
+  "x-forwarded-proto",
+  "x-forwarded-for",
+  "x-vercel-id",
+  "x-vercel-deployment-url",
+  "x-vercel-forwarded-for",
+]);
 
 function isDockerHub(registry) {
   return registry.includes("registry-1.docker.io") || registry.includes("docker.io");
+}
+
+function allowedRegistries(env) {
+  const set = new Set(DEFAULT_REGISTRIES);
+  if (env.EXTRA_REGISTRIES) {
+    for (const r of String(env.EXTRA_REGISTRIES).split(",")) {
+      const h = r.trim();
+      if (h) set.add(h);
+    }
+  }
+  return set;
+}
+
+// Is this path segment an explicit registry host (vs a Docker Hub namespace)?
+function isRegistryHost(seg, env) {
+  if (!seg || !seg.includes(".")) return false; // Docker Hub namespaces have no dots
+  if (allowedRegistries(env).has(seg)) return true;
+  return ALLOWED_SUFFIXES.some((s) => seg.endsWith(s));
+}
+
+// Registry host -> API base URL (Docker Hub's API host differs from its name).
+function registryBase(host) {
+  if (host === "docker.io" || host === "registry-1.docker.io" || host === "index.docker.io") {
+    return DEFAULTS.registry;
+  }
+  return `https://${host}`;
 }
 
 function filterRequestHeaders(headers) {
@@ -63,29 +118,7 @@ function buildResponseHeaders(headers) {
   return out;
 }
 
-// Rewrite `realm="https://auth.docker.io/token"` -> our own token endpoint so
-// the docker client comes back to us for the token instead of hitting Docker
-// directly (which may be blocked / lets us inject our own credentials).
-function rewriteAuthenticate(value, origin) {
-  return value.replace(/realm="[^"]*"/i, `realm="${origin}/v2/auth"`);
-}
-
-async function handleToken(url, cfg, env) {
-  let query = url.search; // e.g. "?service=...&scope=repository:library/nginx:pull"
-  if (!/[?&]service=/.test(query)) {
-    query += (query ? "&" : "?") + "service=" + encodeURIComponent(cfg.service);
-  }
-  const tokenUrl = `${cfg.auth}/token${query}`;
-
-  const headers = new Headers({ accept: "application/json" });
-  // Optional: authenticate the token request with YOUR Docker Hub account so
-  // pulls count against your (higher) rate-limit bucket instead of the shared
-  // anonymous-per-IP bucket that all Vercel egress traffic shares.
-  if (env.DOCKER_USERNAME && env.DOCKER_PASSWORD) {
-    headers.set("authorization", "Basic " + btoa(`${env.DOCKER_USERNAME}:${env.DOCKER_PASSWORD}`));
-  }
-
-  const resp = await fetch(tokenUrl, { headers });
+function forward(resp) {
   return new Response(resp.body, {
     status: resp.status,
     statusText: resp.statusText,
@@ -93,11 +126,50 @@ async function handleToken(url, cfg, env) {
   });
 }
 
-async function proxyV2(request, url, cfg, path) {
-  const target = cfg.registry + path + url.search;
+// Rewrite `realm="https://auth.docker.io/token"` -> our own token endpoint so
+// the docker client comes back to us for the token. Works for any upstream —
+// only the realm is swapped; service/scope/other params are preserved.
+function rewriteAuthenticate(value, origin) {
+  return value.replace(/realm="[^"]*"/i, `realm="${origin}/v2/auth"`);
+}
+
+async function handleToken(url, env) {
+  const service = url.searchParams.get("service") || DEFAULTS.service;
+
+  // Docker Hub: realm is known. Inject the owner's PAT so pulls are attributed
+  // to their account's rate-limit bucket instead of Vercel's shared egress IP.
+  if (service === DEFAULTS.service || service === "docker.io") {
+    const authBase = env.UPSTREAM_AUTH || DEFAULTS.auth;
+    const headers = new Headers({ accept: "application/json" });
+    if (env.DOCKER_USERNAME && env.DOCKER_PASSWORD) {
+      headers.set("authorization", "Basic " + btoa(`${env.DOCKER_USERNAME}:${env.DOCKER_PASSWORD}`));
+    }
+    return forward(await fetch(`${authBase}/token${url.search}`, { headers }));
+  }
+
+  // Other registries: discover the realm by probing the registry's /v2/, then
+  // request an anonymous token from it (each registry uses a different token
+  // path — ghcr /token, quay /v2/auth, ecr /token/ — so we don't hardcode).
+  const base = registryBase(service);
+  let realm = `${base}/token`;
+  try {
+    const probe = await fetch(`${base}/v2/`, { headers: { accept: "application/json" } });
+    const wa = probe.headers.get("www-authenticate");
+    const m = wa && wa.match(/realm="([^"]+)"/i);
+    if (m) realm = m[1];
+  } catch {
+    /* fall back to <base>/token */
+  }
+  const sep = realm.includes("?") ? "&" : "?";
+  const tokenUrl = `${realm}${sep}${url.search.replace(/^\?/, "")}`;
+  return forward(await fetch(tokenUrl, { headers: { accept: "application/json" } }));
+}
+
+async function proxyV2(request, url, route, path) {
+  const target = route.upstream + path + url.search;
   const isBlob =
     (request.method === "GET" || request.method === "HEAD") && /\/blobs\/[^/]+$/.test(path);
-  const passThroughBlob = isBlob && cfg.blobMode === "redirect";
+  const passThroughBlob = isBlob && route.blobMode === "redirect";
 
   const init = {
     method: request.method,
@@ -130,11 +202,7 @@ async function proxyV2(request, url, cfg, path) {
     return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
   }
 
-  return new Response(resp.body, {
-    status: resp.status,
-    statusText: resp.statusText,
-    headers: buildResponseHeaders(resp.headers),
-  });
+  return forward(resp);
 }
 
 export async function handleRequest(request, env = {}) {
@@ -146,20 +214,14 @@ export async function handleRequest(request, env = {}) {
     auth: env.UPSTREAM_AUTH || DEFAULTS.auth,
     service: env.UPSTREAM_SERVICE || DEFAULTS.service,
   };
-  // Whether to expand single-name images to library/<name> (Docker Hub's
-  // official-image convention). Auto-on for Docker Hub; override via env for
-  // Docker-Hub-compatible mirrors.
+  // Expand single-name images to library/<name> (Docker Hub official-image
+  // convention). Auto-on for Docker Hub; override via env for compatible mirrors.
   cfg.libraryRedirect =
     env.LIBRARY_REDIRECT != null
       ? !["0", "false", "off"].includes(String(env.LIBRARY_REDIRECT).toLowerCase())
       : isDockerHub(cfg.registry);
-  // Blob delivery strategy:
-  //   "stream"   (default) — follow the registry's 307 to the CDN and stream
-  //              the layer bytes THROUGH this function. Truly accelerates, but
-  //              every byte counts against Vercel's 100GB/mo egress.
-  //   "redirect" — hand the CDN 307 back to the client so layer bytes go
-  //              client<->CDN directly and never meter Vercel. Saves bandwidth;
-  //              only helps if the client can reach the CDN.
+  // Blob delivery: "stream" (default, real acceleration, uses Vercel egress) or
+  // "redirect" (hand the CDN 307 to the client, saves bandwidth).
   cfg.blobMode = env.BLOB_MODE === "redirect" ? "redirect" : "stream";
 
   if (pathname === "/") {
@@ -169,30 +231,41 @@ export async function handleRequest(request, env = {}) {
     });
   }
 
-  // Our rewritten token realm lands here.
+  // Our rewritten token realm lands here (any upstream).
   if (pathname === "/v2/auth") {
-    return handleToken(url, cfg, env);
+    return handleToken(url, env);
   }
 
-  // Registry v2 base ping.
+  // Registry v2 base ping (registry-agnostic; proxy to Docker Hub for the challenge).
   if (pathname === "/v2/") {
-    return proxyV2(request, url, cfg, "/v2/");
+    return proxyV2(request, url, { upstream: cfg.registry, blobMode: cfg.blobMode }, "/v2/");
   }
 
   if (pathname.startsWith("/v2/")) {
-    // Docker Hub official-image namespace expansion: a custom-prefix pull of
-    // `mydomain/nginx` arrives as /v2/nginx/manifests/<ref> (5 path segments).
-    // Real namespaced repos (/v2/ns/repo/...) have 6+. Redirect single-name
-    // images to library/<name> so `docker pull mydomain/nginx` works.
+    const parts = pathname.split("/"); // ["", "v2", <seg>, ...]
+    const first = parts[2];
+
+    // Explicit registry via dotted first segment: /v2/ghcr.io/owner/img/...
+    if (first && first.includes(".")) {
+      if (!isRegistryHost(first, env)) {
+        return new Response(
+          `Registry not allowed: ${first}\nAllowed: ${[...allowedRegistries(env)].join(", ")}\nAdd more via the EXTRA_REGISTRIES env var.\n`,
+          { status: 404, headers: { "content-type": "text/plain; charset=utf-8" } },
+        );
+      }
+      const strippedPath = "/v2/" + parts.slice(3).join("/");
+      return proxyV2(request, url, { upstream: registryBase(first), blobMode: cfg.blobMode }, strippedPath);
+    }
+
+    // Default: Docker Hub, with library/ auto-expansion for single-name images.
     if (cfg.libraryRedirect) {
-      const parts = pathname.split("/"); // ["", "v2", <name>, <verb>, ...]
       const verbs = ["manifests", "blobs", "tags"];
       if (parts.length === 5 && verbs.includes(parts[3]) && parts[2] !== "library") {
         parts.splice(2, 0, "library");
         return Response.redirect(`${url.origin}${parts.join("/")}${search}`, 301);
       }
     }
-    return proxyV2(request, url, cfg, pathname);
+    return proxyV2(request, url, { upstream: cfg.registry, blobMode: cfg.blobMode }, pathname);
   }
 
   return new Response("Not Found", { status: 404 });
@@ -203,15 +276,17 @@ function landingPage(host) {
 <style>body{font-family:system-ui,sans-serif;max-width:46rem;margin:3rem auto;padding:0 1rem;line-height:1.6;color:#222}code{background:#f4f4f5;padding:.1rem .35rem;border-radius:4px}pre{background:#f4f4f5;padding:1rem;border-radius:8px;overflow:auto}</style>
 </head><body>
 <h1>redocker</h1>
-<p>A Docker Hub pull-through mirror running on Vercel Edge.</p>
-<h3>Use as a registry mirror</h3>
+<p>A multi-registry Docker pull-through mirror running on Vercel.</p>
+<h3>Docker Hub — use as a registry mirror</h3>
 <pre>// /etc/docker/daemon.json
 {
   "registry-mirrors": ["https://${host}"]
 }</pre>
-<p>Then restart docker and <code>docker pull nginx</code> goes through this mirror.</p>
-<h3>Or pull by prefix</h3>
-<pre>docker pull ${host}/library/nginx:latest
-docker pull ${host}/nginx        # auto-expands to library/nginx</pre>
+<p>Then <code>docker pull nginx</code> goes through this mirror.</p>
+<h3>Any registry — pull by prefix</h3>
+<pre>docker pull ${host}/library/nginx          # Docker Hub (auto library/)
+docker pull ${host}/ghcr.io/cli/cli        # GitHub Container Registry
+docker pull ${host}/quay.io/prometheus/busybox
+docker pull ${host}/registry.k8s.io/pause:3.9</pre>
 </body></html>`;
 }

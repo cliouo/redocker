@@ -1,6 +1,6 @@
 # redocker
 
-A **Docker Hub pull-through mirror** that runs on **Vercel's free (Hobby) tier**, bound to your own domain. It speaks the Docker Registry v2 HTTP API, transparently handling the token-auth dance, multi-arch manifests, the `library/` namespace, and layer (blob) delivery.
+A **multi-registry pull-through mirror** (Docker Hub, ghcr.io, quay.io, gcr.io, registry.k8s.io, …) that runs on **Vercel's free (Hobby) tier**, bound to your own domain. It speaks the Docker Registry v2 HTTP API, transparently handling the token-auth dance, multi-arch manifests, the `library/` namespace, and layer (blob) delivery.
 
 ## 🚀 One-click deploy
 
@@ -124,8 +124,19 @@ docker pull hello-world
 **Option B — explicit prefix (works for any tag, no daemon change):**
 ```bash
 docker pull YOUR_DOMAIN/library/nginx:latest
-docker pull YOUR_DOMAIN/nginx          # auto-expands to library/nginx
+docker pull YOUR_DOMAIN/nginx                       # auto-expands to library/nginx
 ```
+
+**Option C — other registries (prefix with the registry host):**
+```bash
+docker pull YOUR_DOMAIN/ghcr.io/astral-sh/uv:latest
+docker pull YOUR_DOMAIN/quay.io/podman/hello:latest
+docker pull YOUR_DOMAIN/gcr.io/distroless/static:latest
+docker pull YOUR_DOMAIN/registry.k8s.io/pause:3.9
+```
+A first path segment containing a dot (e.g. `ghcr.io`) is treated as the upstream registry host; Docker Hub namespaces never contain dots, so there's no ambiguity. `registry-mirrors` only mirrors Docker Hub, so use this prefix form for everything else.
+
+**Supported registries:** `docker.io`, `ghcr.io`, `quay.io`, `gcr.io`, `registry.k8s.io`, `k8s.gcr.io`, `mcr.microsoft.com`, `public.ecr.aws`, `registry.gitlab.com`, `nvcr.io`, and `*.pkg.dev` (Google Artifact Registry). Add more with the `EXTRA_REGISTRIES` env var. Anything not on the allowlist returns `404` (so the proxy can't be abused as an open relay). Registries needing your own credentials (e.g. AWS ECR, private repos) only work for anonymous/public images here.
 
 ---
 
@@ -137,7 +148,8 @@ docker pull YOUR_DOMAIN/nginx          # auto-expands to library/nginx
 | `DOCKER_PASSWORD` | — | A Docker Hub **Personal Access Token** (not your password). |
 | `BLOB_MODE` | `stream` | `stream`: proxy fetches & streams layer bytes (true acceleration, uses Vercel bandwidth). `redirect`: hand the CDN `307` back to the client (saves bandwidth, but the client must be able to reach Docker's CDN). |
 | `LIBRARY_REDIRECT` | auto | Force the `library/` namespace redirect on/off (auto-on for Docker Hub). |
-| `UPSTREAM_REGISTRY` | `https://registry-1.docker.io` | Upstream registry. |
+| `EXTRA_REGISTRIES` | — | Comma-separated extra registry hosts to allow as path prefixes (beyond the built-in allowlist). |
+| `UPSTREAM_REGISTRY` | `https://registry-1.docker.io` | Default upstream (used when no registry-host prefix is given). |
 | `UPSTREAM_AUTH` | `https://auth.docker.io` | Upstream token service (proxy appends `/token`). |
 | `UPSTREAM_SERVICE` | `registry.docker.io` | The token `service` value. |
 

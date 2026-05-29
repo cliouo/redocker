@@ -13,6 +13,7 @@ export function readEnv(source = process.env) {
     UPSTREAM_SERVICE: source.UPSTREAM_SERVICE,
     LIBRARY_REDIRECT: source.LIBRARY_REDIRECT,
     BLOB_MODE: source.BLOB_MODE,
+    EXTRA_REGISTRIES: source.EXTRA_REGISTRIES,
   };
 }
 
