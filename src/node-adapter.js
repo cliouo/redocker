@@ -14,6 +14,7 @@ export function readEnv(source = process.env) {
     LIBRARY_REDIRECT: source.LIBRARY_REDIRECT,
     BLOB_MODE: source.BLOB_MODE,
     EXTRA_REGISTRIES: source.EXTRA_REGISTRIES,
+    EXTRA_SUBDOMAINS: source.EXTRA_SUBDOMAINS,
   };
 }
 

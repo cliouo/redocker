@@ -39,6 +39,7 @@ const authOf = (u) => {
 };
 const ENV = { DOCKER_USERNAME: "u", DOCKER_PASSWORD: "p" };
 const G = (p) => new Request("https://proxy.test" + p, { headers: { authorization: "Bearer x" } });
+const G2 = (host, p) => new Request("https://" + host + p, { headers: { authorization: "Bearer x" } });
 
 calls = []; await handleRequest(G("/v2/ghcr.io/owner/img/manifests/abc"), ENV);
 check("ghcr.io prefix routes+strips", fetched("https://ghcr.io/v2/owner/img/manifests/abc"), urls());
@@ -77,6 +78,20 @@ calls = []; await handleRequest(new Request("https://proxy.test/v2/auth?service=
 check("token(ghcr) -> probes https://ghcr.io/v2/", fetched("https://ghcr.io/v2/"), urls());
 check("token(ghcr) -> uses discovered realm", calls.some((c) => c.url.startsWith("https://auth.probe/token")), urls());
 check("token(ghcr) -> does NOT leak docker creds", !authOf("https://auth.probe/token"), "leaked Basic to other registry");
+
+// --- Subdomain (host) mode: host pins the registry; no path-prefix strip ---
+calls = []; await handleRequest(G2("ghcr.redocker.8908900.xyz", "/v2/owner/img/manifests/x"), ENV);
+check("subdomain ghcr.* -> ghcr.io (no strip)", fetched("https://ghcr.io/v2/owner/img/manifests/x"), urls());
+
+calls = []; let rr = await handleRequest(G2("docker.redocker.8908900.xyz", "/v2/nginx/manifests/latest"), ENV);
+check("subdomain docker.* single-name -> 301 library", rr.status === 301 && (rr.headers.get("location") || "").endsWith("/v2/library/nginx/manifests/latest"), rr.status + " " + rr.headers.get("location"));
+
+// --- Client credential pass-through (private pulls) ---
+calls = []; await handleRequest(new Request("https://ghcr.redocker.8908900.xyz/v2/auth?service=ghcr.io&scope=repository:owner/private:pull", { headers: { authorization: "Basic CLIENTGHCR" } }), ENV);
+check("token(ghcr subdomain) forwards CLIENT creds upstream", authOf("https://auth.probe/token") === "Basic CLIENTGHCR", authOf("https://auth.probe/token"));
+
+calls = []; await handleRequest(new Request("https://proxy.test/v2/auth?service=registry.docker.io&scope=repository:me/private:pull", { headers: { authorization: "Basic CLIENTHUB" } }), ENV);
+check("token(docker hub) client creds OVERRIDE server PAT", authOf("https://auth.docker.io/token") === "Basic CLIENTHUB", authOf("https://auth.docker.io/token"));
 
 globalThis.fetch = realFetch;
 console.log(failures === 0 ? "\nmulti-registry: ALL PASS" : `\nmulti-registry: ${failures} FAILED`);

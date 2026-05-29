@@ -149,6 +149,24 @@ A first path segment containing a dot (e.g. `ghcr.io`) is treated as the upstrea
 
 ---
 
+## Private images (log in per registry)
+
+Private images need a **per-registry login**, so use a **registry subdomain** (not the path prefix). The proxy **forwards** your credentials to that registry and **never stores them**, so private images stay private — only someone with the real credentials can pull.
+
+One-time setup (per registry you log into):
+1. Add the subdomain to the SAME Vercel project: Settings → Domains → Add `ghcr.YOUR_DOMAIN`; DNS `CNAME → cname.vercel-dns.com`.
+2. Log in and pull (a ghcr PAT needs the `read:packages` scope):
+```bash
+echo <YOUR_GHCR_PAT> | docker login ghcr.YOUR_DOMAIN -u <YOUR_GH_USERNAME> --password-stdin
+docker pull ghcr.YOUR_DOMAIN/owner/private-image:tag
+```
+
+**Subdomain → registry map:** `ghcr`→ghcr.io, `quay`→quay.io, `gcr`→gcr.io, `k8s`→registry.k8s.io, `mcr`→mcr.microsoft.com, `ecr`→public.ecr.aws, `gitlab`→registry.gitlab.com, `nvcr`→nvcr.io, `docker`→Docker Hub. Add more with `EXTRA_SUBDOMAINS="label=host"`.
+
+> ⚠️ **Security:** never put a private-repo token in the proxy's env vars on a public deployment — that exposes those images to anyone who can reach the proxy. The subdomain + login flow keeps credentials client-side.
+
+---
+
 ## Environment variables
 
 | Variable | Default | Purpose |
@@ -158,6 +176,7 @@ A first path segment containing a dot (e.g. `ghcr.io`) is treated as the upstrea
 | `BLOB_MODE` | `stream` | `stream`: proxy fetches & streams layer bytes (true acceleration, uses Vercel bandwidth). `redirect`: hand the CDN `307` back to the client (saves bandwidth, but the client must be able to reach the CDN). |
 | `LIBRARY_REDIRECT` | auto | Force the `library/` namespace redirect on/off (auto-on for Docker Hub). |
 | `EXTRA_REGISTRIES` | — | Comma-separated extra registry hosts to allow as path prefixes (beyond the built-in allowlist). |
+| `EXTRA_SUBDOMAINS` | — | Extra "subdomain-label=registry-host" mappings, comma-separated (e.g. `gitlab=registry.gitlab.com`). |
 | `UPSTREAM_REGISTRY` | `https://registry-1.docker.io` | Default upstream (used when no registry-host prefix is given). |
 | `UPSTREAM_AUTH` | `https://auth.docker.io` | Upstream token service (proxy appends `/token`). |
 | `UPSTREAM_SERVICE` | `registry.docker.io` | The token `service` value. |

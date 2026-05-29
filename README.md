@@ -149,6 +149,24 @@ docker pull 你的域名/registry.k8s.io/pause:3.9
 
 ---
 
+## 私有镜像(登录后拉取私仓)
+
+私有镜像需要**按 registry 登录**,所以要用 **registry 子域名**(而不是路径前缀)。代理会把你的凭据**转发**给该 registry —— 它自己**不保存任何凭据**,因此私有镜像只有持有真实凭据的人能拉。
+
+一次性设置(每个要登录的 registry 各一次):
+1. 把子域名加到**同一个 Vercel 项目**:Settings → Domains → Add `ghcr.你的域名`;DNS 加一条 `CNAME → cname.vercel-dns.com`。
+2. 登录并拉取(ghcr 的 PAT 需要 `read:packages` 权限):
+```bash
+echo <你的 GHCR_PAT> | docker login ghcr.你的域名 -u <你的GitHub用户名> --password-stdin
+docker pull ghcr.你的域名/owner/private-image:tag
+```
+
+**子域名 → registry 映射**:`ghcr`→ghcr.io、`quay`→quay.io、`gcr`→gcr.io、`k8s`→registry.k8s.io、`mcr`→mcr.microsoft.com、`ecr`→public.ecr.aws、`gitlab`→registry.gitlab.com、`nvcr`→nvcr.io、`docker`→Docker Hub。要加别的用 `EXTRA_SUBDOMAINS="标签=主机名"`。
+
+> ⚠️ **安全红线**:绝不要把私仓的 token 放进公共部署的环境变量里让代理统一注入 —— 那等于把这些私有镜像暴露给所有能访问代理的人。子域名 + 登录的方式让凭据始终留在客户端。
+
+---
+
 ## 环境变量
 
 | 变量 | 默认值 | 作用 |
@@ -158,6 +176,7 @@ docker pull 你的域名/registry.k8s.io/pause:3.9
 | `BLOB_MODE` | `stream` | `stream`:代理抓取并**流式中转**层字节(真正加速,消耗 Vercel 带宽)。`redirect`:把 CDN 的 `307` 直接还给客户端(省带宽,但要求客户端能直连该 CDN)。 |
 | `LIBRARY_REDIRECT` | auto | 强制开/关 `library/` 命名空间补全(Docker Hub 默认开)。 |
 | `EXTRA_REGISTRIES` | — | 逗号分隔的额外 registry 主机,加入前缀允许名单(在内置名单之外)。 |
+| `EXTRA_SUBDOMAINS` | — | 额外的"子域名标签=registry主机"映射,逗号分隔(如 `gitlab=registry.gitlab.com`)。 |
 | `UPSTREAM_REGISTRY` | `https://registry-1.docker.io` | 默认上游(当没有指定 registry 主机前缀时使用)。 |
 | `UPSTREAM_AUTH` | `https://auth.docker.io` | 上游 token 服务(代理会追加 `/token`)。 |
 | `UPSTREAM_SERVICE` | `registry.docker.io` | token 的 `service` 值。 |
