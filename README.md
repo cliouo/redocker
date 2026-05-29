@@ -4,9 +4,7 @@ A **Docker Hub pull-through mirror** that runs on **Vercel's free (Hobby) tier**
 
 ## 🚀 One-click deploy
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/YOUR_GH_USERNAME/redocker&env=DOCKER_USERNAME,DOCKER_PASSWORD&envDescription=Docker%20Hub%20username%20%2B%20a%20Personal%20Access%20Token%20(use%20a%20throwaway%20account)%20for%20authenticated%20pulls&envLink=https://github.com/YOUR_GH_USERNAME/redocker%23environment-variables&project-name=redocker&repository-name=redocker)
-
-> **Replace `YOUR_GH_USERNAME`** (in the two links above) with your GitHub username after you create the repo.
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/cliouo/redocker&env=DOCKER_USERNAME,DOCKER_PASSWORD&envDescription=Docker%20Hub%20username%20%2B%20a%20Personal%20Access%20Token%20(use%20a%20throwaway%20account)%20for%20authenticated%20pulls&envLink=https://github.com/cliouo/redocker%23environment-variables&project-name=redocker&repository-name=redocker)
 
 Clicking it clones this repo into your Vercel account and prompts for `DOCKER_USERNAME` / `DOCKER_PASSWORD`. After it deploys, two manual steps remain (Vercel can't automate them): **[disable Deployment Protection](#1-disable-deployment-protection-critical)** and **[bind your domain](#3-bind-your-domain)**. Then point Docker at it — see [below](#point-docker-at-it).
 
