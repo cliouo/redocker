@@ -1,168 +1,181 @@
+**简体中文** | [English](./README.en.md)
+
 # redocker
 
-A **multi-registry pull-through mirror** (Docker Hub, ghcr.io, quay.io, gcr.io, registry.k8s.io, …) that runs on **Vercel's free (Hobby) tier**, bound to your own domain. It speaks the Docker Registry v2 HTTP API, transparently handling the token-auth dance, multi-arch manifests, the `library/` namespace, and layer (blob) delivery.
+一个跑在 **Vercel 免费版(Hobby)** 上、绑定你自己域名的**多 registry 拉取加速代理**(Docker Hub、ghcr.io、quay.io、gcr.io、registry.k8s.io 等)。它实现了 Docker Registry v2 HTTP API,透明处理 token 鉴权、多架构 manifest、`library/` 命名空间以及镜像层(blob)的分发。
 
-## 🚀 One-click deploy
+## 🚀 一键部署
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/cliouo/redocker&env=DOCKER_USERNAME,DOCKER_PASSWORD&envDescription=Docker%20Hub%20username%20%2B%20a%20Personal%20Access%20Token%20(use%20a%20throwaway%20account)%20for%20authenticated%20pulls&envLink=https://github.com/cliouo/redocker%23environment-variables&project-name=redocker&repository-name=redocker)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/cliouo/redocker&env=DOCKER_USERNAME,DOCKER_PASSWORD&envDescription=Docker%20Hub%20username%20%2B%20a%20Personal%20Access%20Token%20(use%20a%20throwaway%20account)%20for%20authenticated%20pulls&envLink=https://github.com/cliouo/redocker/blob/main/README.en.md%23environment-variables&project-name=redocker&repository-name=redocker)
 
-Clicking it clones this repo into your Vercel account and prompts for `DOCKER_USERNAME` / `DOCKER_PASSWORD`. After it deploys, two manual steps remain (Vercel can't automate them): **[disable Deployment Protection](#1-disable-deployment-protection-critical)** and **[bind your domain](#3-bind-your-domain)**. Then point Docker at it — see [below](#point-docker-at-it).
+点击后会把本仓库克隆进你的 Vercel 账号,并提示填写 `DOCKER_USERNAME` / `DOCKER_PASSWORD`。部署完成后还有两步需要手动做(Vercel 无法自动完成),详见 [部署到 Vercel](#部署到-vercel):**关闭部署保护**、**绑定域名**。然后让 Docker 指向它 —— 见 [让 Docker 走代理](#让-docker-走代理)。
 
-> **Feasibility: GO (with caveats).** The full pull flow has been validated end-to-end (10/10) against real Docker Hub content. The caveats are about free-tier *economics* (bandwidth, rate limits), not correctness — see [Limits & caveats](#limits--caveats).
+> **可行性结论:GO(有注意事项)。** 完整拉取流程已对真实 Docker Hub 内容端到端验证(10/10)。注意事项都是免费额度的*经济性*问题(带宽、限流),而非正确性问题 —— 见 [限制与注意事项](#限制与注意事项)。
 
 ---
 
-## How it works
+## 工作原理
 
-`docker pull` is a sequence of HTTP calls. The proxy sits in front of `registry-1.docker.io` and rewrites just enough to keep the client coming back through it:
+`docker pull` 本质是一连串 HTTP 请求。代理挡在 `registry-1.docker.io` 前面,只改写恰好足够的内容,让客户端始终经过它:
 
 ```
-docker client                redocker (Vercel)              Docker Hub
+docker 客户端                redocker (Vercel)              Docker Hub
      │  GET /v2/                    │                            │
      │ ───────────────────────────►│  GET /v2/                  │
      │                             │ ──────────────────────────►│
      │                             │ ◄── 401 WWW-Authenticate ──│  realm=auth.docker.io
-     │ ◄── 401, realm REWRITTEN ───│      (realm → /v2/auth)     │
+     │ ◄── 401, realm 已改写 ───────│      (realm → /v2/auth)     │
      │  GET /v2/auth?scope&service  │                            │
      │ ───────────────────────────►│  GET auth.docker.io/token  │
-     │                             │ ──(+ your PAT, optional)──►│
+     │                             │ ──(+ 你的 PAT, 可选)───────►│
      │ ◄────────── token ──────────│ ◄────────── token ─────────│
      │  GET .../manifests/<ref>     │                            │
-     │ ───────────────────────────►│ ─────────────────────────►│  (Accept negotiated, multi-arch)
+     │ ───────────────────────────►│ ─────────────────────────►│  (Accept 协商, 多架构)
      │ ◄────────── manifest ───────│ ◄───────── manifest ───────│
      │  GET .../blobs/<digest>      │                            │
      │ ───────────────────────────►│ ─────────────────────────►│  307 → CDN
-     │ ◄─── layer bytes (stream) ───│ ◄═══════ stream ═══════════╛
+     │ ◄─── 镜像层字节 (流式) ───────│ ◄═══════ stream ═══════════╛
 ```
 
-- **Token realm rewrite** — every `401` has its `WWW-Authenticate` `realm` rewritten to `/v2/auth` so auth always flows through the proxy (this is also what lets the proxy inject *your* Docker Hub credentials).
-- **`library/` expansion** — `docker pull yourdomain/nginx` (single name) is `301`-redirected to `library/nginx`.
-- **Blob delivery** — two strategies, see [`BLOB_MODE`](#environment-variables).
-- **Stateless** — no caching layer; Docker's *local* layer cache means already-pulled layers aren't re-fetched.
+- **Token realm 改写** —— 每个 `401` 的 `WWW-Authenticate` 里的 `realm` 都被改写成 `/v2/auth`,使鉴权始终经过代理(这也是代理能注入*你的* Docker Hub 凭据的前提)。
+- **`library/` 补全** —— `docker pull 你的域名/nginx`(单段名)会被 `301` 重定向到 `library/nginx`。
+- **多 registry** —— 第一段路径含点(如 `/v2/ghcr.io/...`)即被路由到对应 registry,见 [让 Docker 走代理](#让-docker-走代理)。
+- **Blob 分发** —— 两种策略,见 [`BLOB_MODE`](#环境变量)。
+- **无状态** —— 没有服务端缓存层;但 Docker *本地*的层缓存意味着已拉过的层不会被重复拉取。
 
-Code map:
-- `src/proxy.js` — the runtime-agnostic core (Web-standard `fetch`/`Request`/`Response` only).
-- `src/node-adapter.js` — bridges Node `(req,res)` ⇄ the core, streaming the body.
-- `api/proxy.js` — the Vercel serverless function (Node runtime); all paths route here via `vercel.json`.
-- `local-server.js` — runs the **same** adapter locally for testing.
-- `test/v2-flow.sh` — curl walk of the full v2 flow.
+代码结构:
+- `src/proxy.js` —— 运行时无关的核心(只用 Web 标准 `fetch`/`Request`/`Response`)。
+- `src/node-adapter.js` —— 桥接 Node `(req,res)` ⇄ 核心,流式传输响应体。
+- `api/proxy.js` —— Vercel serverless 函数(Node 运行时);所有路径经 `vercel.json` 路由到这里。
+- `local-server.js` —— 本地用**同一个** adapter 跑起来做测试。
+- `test/` —— 完整 v2 流程的 curl 测试 + 确定性的路由/重定向单测。
 
 ---
 
-## Local test (reproduce the validation)
+## 本地测试
 
-No docker needed — `curl` speaks the same API. Because Docker Hub is blocked on some networks (e.g. behind the GFW), point the test at a reachable Docker Hub mirror as the upstream:
+确定性单测(mock 掉网络,无需 docker):
 
 ```bash
-# Terminal 1 — start the proxy against a reachable Docker Hub mirror
+npm run test:unit     # 路由 + blob 模式逻辑,共 20 项断言
+```
+
+用 `curl` 走完整 v2 流程,对接真实上游。由于某些网络(如墙内)直连 Docker Hub 被阻断,把测试指向一个可达的 Docker Hub 镜像作上游:
+
+```bash
+# 终端 1 —— 把代理指向一个可达的 Docker Hub 镜像
 UPSTREAM_REGISTRY=https://docker.m.daocloud.io \
 UPSTREAM_AUTH=https://m.daocloud.io/auth \
 UPSTREAM_SERVICE=docker.m.daocloud.io \
 LIBRARY_REDIRECT=1 \
 node local-server.js
 
-# Terminal 2 — walk the flow
+# 终端 2 —— 走一遍完整流程
 BASE=http://localhost:8787 bash test/v2-flow.sh
 # => 10 passed, 0 failed
 ```
 
-The test proves: `401` + realm rewrite, `library/` redirect, token forwarding, multi-arch index negotiation, `HEAD` + `Docker-Content-Digest`, and a **byte-exact blob download (sha256 matches the digest)**.
+流程测试验证了:`401` + realm 改写、`library/` 重定向、token 转发、多架构 index 的 Accept 协商、`HEAD` + `Docker-Content-Digest`,以及**逐字节正确的 blob 下载(sha256 与摘要一致)**。
 
 ---
 
-## Deploy to Vercel
+## 部署到 Vercel
 
-**Easiest:** click the **[one-click Deploy button](#-one-click-deploy)** at the top. Or via CLI:
+**最简单**:点本文档顶部的 **[一键部署按钮](#-一键部署)**。或用 CLI:
 
 ```bash
-npm i -g vercel        # or use `npx vercel`
+npm i -g vercel        # 或直接用 `npx vercel`
 cd redocker
-vercel                 # link/create a project (first run = preview)
-vercel --prod          # production deploy
+vercel                 # 关联/新建项目(首次为 preview)
+vercel --prod          # 部署到生产
 ```
 
-Either way, complete these steps:
+无论哪种方式,都要完成下面几步:
 
-### 1. Disable Deployment Protection (critical)
-New Vercel projects often enable **Vercel Authentication**, which puts an SSO login page in front of every request. A docker client can't log in, so pulls would fail with HTML.
+### 1. 关闭部署保护(关键)
+新建的 Vercel 项目常默认开启 **Vercel Authentication**,会在每个请求前面套一层 SSO 登录页。docker 客户端没法登录,拉取会拿到一堆 HTML 而失败。
 
-> Dashboard → your project → **Settings → Deployment Protection → Vercel Authentication → Disabled** (for Production).
+> Dashboard → 你的项目 → **Settings → Deployment Protection → Vercel Authentication → 设为 Disabled**(对 Production 生效)。
 
-### 2. Set environment variables (strongly recommended)
-> Dashboard → **Settings → Environment Variables**, or `vercel env add NAME`.
+### 2. 配置环境变量(强烈建议)
+> Dashboard → **Settings → Environment Variables**,或 `vercel env add NAME`。
 
-Set `DOCKER_USERNAME` + `DOCKER_PASSWORD` so pulls are authenticated to *your* account (per-account rate limit) instead of the shared anonymous-per-IP bucket of Vercel's egress. See [Limits & caveats](#limits--caveats) for why this matters and the throwaway-account note.
+设置 `DOCKER_USERNAME` + `DOCKER_PASSWORD`,让拉取认证到*你自己*的账号(按账号限流),而不是落到 Vercel 出口共享 IP 的匿名(按 IP)额度里。为什么重要、以及"小号"的建议,见 [限制与注意事项](#限制与注意事项)。
 
-### 3. Bind your domain
-> Dashboard → **Settings → Domains → Add**, then create the DNS record Vercel shows you:
-> - **Subdomain** (e.g. `docker.example.com`): `CNAME` → `cname.vercel-dns.com`
-> - **Apex** (e.g. `example.com`): `A` → `76.76.21.21`
+### 3. 绑定域名
+> Dashboard → **Settings → Domains → Add**,然后按 Vercel 给出的提示加 DNS 记录:
+> - **子域**(如 `docker.example.com`):`CNAME` → `cname.vercel-dns.com`
+> - **裸域/顶级域**(如 `example.com`):`A` → `76.76.21.21`
 
-Vercel issues TLS automatically. (Use a custom domain — the default `*.vercel.app` host can be unreachable on some networks.)
+Vercel 会自动签发 TLS 证书。(请用自定义域名 —— 默认的 `*.vercel.app` 在某些网络下可能不可达。)
 
-### 4. Verify the deployment
+### 4. 验证部署
 ```bash
-curl -i https://YOUR_DOMAIN/v2/
-# Expect: HTTP/2 401  +  www-authenticate: Bearer realm="https://YOUR_DOMAIN/v2/auth",service="registry.docker.io"
+curl -i https://你的域名/v2/
+# 期望:HTTP/2 401  +  www-authenticate: Bearer realm="https://你的域名/v2/auth",service="registry.docker.io"
 ```
 
 ---
 
-## Point Docker at it
+## 让 Docker 走代理
 
-**Option A — registry mirror (Docker Hub only, transparent):**
+**方式 A —— 配置为镜像源(仅 Docker Hub,透明):**
 ```json
 // Linux: /etc/docker/daemon.json   |   macOS/Win: Docker Desktop → Settings → Docker Engine
-{ "registry-mirrors": ["https://YOUR_DOMAIN"] }
+{ "registry-mirrors": ["https://你的域名"] }
 ```
-Restart Docker, then pull normally:
+重启 Docker,然后照常拉取:
 ```bash
-docker pull nginx          # goes through your mirror
+docker pull nginx          # 自动走你的镜像源
 docker pull hello-world
 ```
 
-**Option B — explicit prefix (works for any tag, no daemon change):**
+**方式 B —— 显式前缀(任意 tag,无需改 daemon):**
 ```bash
-docker pull YOUR_DOMAIN/library/nginx:latest
-docker pull YOUR_DOMAIN/nginx                       # auto-expands to library/nginx
+docker pull 你的域名/library/nginx:latest
+docker pull 你的域名/nginx                       # 自动补全为 library/nginx
 ```
 
-**Option C — other registries (prefix with the registry host):**
+**方式 C —— 其他 registry(用 registry 主机名作前缀):**
 ```bash
-docker pull YOUR_DOMAIN/ghcr.io/astral-sh/uv:latest
-docker pull YOUR_DOMAIN/quay.io/podman/hello:latest
-docker pull YOUR_DOMAIN/gcr.io/distroless/static:latest
-docker pull YOUR_DOMAIN/registry.k8s.io/pause:3.9
+docker pull 你的域名/ghcr.io/astral-sh/uv:latest
+docker pull 你的域名/quay.io/podman/hello:latest
+docker pull 你的域名/gcr.io/distroless/static:latest
+docker pull 你的域名/registry.k8s.io/pause:3.9
 ```
-A first path segment containing a dot (e.g. `ghcr.io`) is treated as the upstream registry host; Docker Hub namespaces never contain dots, so there's no ambiguity. `registry-mirrors` only mirrors Docker Hub, so use this prefix form for everything else.
+第一段路径含点(如 `ghcr.io`)就会被当作上游 registry 主机;Docker Hub 的命名空间永远不含点,所以不会有歧义。`registry-mirrors` 只能镜像 Docker Hub,其它 registry 一律用这种前缀方式。
 
-**Supported registries:** `docker.io`, `ghcr.io`, `quay.io`, `gcr.io`, `registry.k8s.io`, `k8s.gcr.io`, `mcr.microsoft.com`, `public.ecr.aws`, `registry.gitlab.com`, `nvcr.io`, and `*.pkg.dev` (Google Artifact Registry). Add more with the `EXTRA_REGISTRIES` env var. Anything not on the allowlist returns `404` (so the proxy can't be abused as an open relay). Registries needing your own credentials (e.g. AWS ECR, private repos) only work for anonymous/public images here.
+**支持的 registry:** `docker.io`、`ghcr.io`、`quay.io`、`gcr.io`、`registry.k8s.io`、`k8s.gcr.io`、`mcr.microsoft.com`、`public.ecr.aws`、`registry.gitlab.com`、`nvcr.io`,以及 `*.pkg.dev`(Google Artifact Registry)。要加别的用 `EXTRA_REGISTRIES` 环境变量。不在允许名单里的会返回 `404`(避免代理被滥用为开放中继)。需要你自己凭据的 registry(如 AWS ECR、私有库)在这里仅适用于匿名/公开镜像。
 
 ---
 
-## Environment variables
+## 环境变量
 
-| Variable | Default | Purpose |
+| 变量 | 默认值 | 作用 |
 |---|---|---|
-| `DOCKER_USERNAME` | — | Docker Hub username for authenticated pulls (rate-limit attribution). |
-| `DOCKER_PASSWORD` | — | A Docker Hub **Personal Access Token** (not your password). |
-| `BLOB_MODE` | `stream` | `stream`: proxy fetches & streams layer bytes (true acceleration, uses Vercel bandwidth). `redirect`: hand the CDN `307` back to the client (saves bandwidth, but the client must be able to reach Docker's CDN). |
-| `LIBRARY_REDIRECT` | auto | Force the `library/` namespace redirect on/off (auto-on for Docker Hub). |
-| `EXTRA_REGISTRIES` | — | Comma-separated extra registry hosts to allow as path prefixes (beyond the built-in allowlist). |
-| `UPSTREAM_REGISTRY` | `https://registry-1.docker.io` | Default upstream (used when no registry-host prefix is given). |
-| `UPSTREAM_AUTH` | `https://auth.docker.io` | Upstream token service (proxy appends `/token`). |
-| `UPSTREAM_SERVICE` | `registry.docker.io` | The token `service` value. |
+| `DOCKER_USERNAME` | — | Docker Hub 用户名,用于认证拉取(限流归属到你的账号)。 |
+| `DOCKER_PASSWORD` | — | Docker Hub 的 **Personal Access Token(PAT)**,不是登录密码。 |
+| `BLOB_MODE` | `stream` | `stream`:代理抓取并**流式中转**层字节(真正加速,消耗 Vercel 带宽)。`redirect`:把 CDN 的 `307` 直接还给客户端(省带宽,但要求客户端能直连该 CDN)。 |
+| `LIBRARY_REDIRECT` | auto | 强制开/关 `library/` 命名空间补全(Docker Hub 默认开)。 |
+| `EXTRA_REGISTRIES` | — | 逗号分隔的额外 registry 主机,加入前缀允许名单(在内置名单之外)。 |
+| `UPSTREAM_REGISTRY` | `https://registry-1.docker.io` | 默认上游(当没有指定 registry 主机前缀时使用)。 |
+| `UPSTREAM_AUTH` | `https://auth.docker.io` | 上游 token 服务(代理会追加 `/token`)。 |
+| `UPSTREAM_SERVICE` | `registry.docker.io` | token 的 `service` 值。 |
 
 ---
 
-## Limits & caveats
+## 限制与注意事项
 
-Validated as feasible for **personal, low-volume** use. Know these before relying on it:
+已验证在**个人、低用量**场景下可行。依赖它之前请了解这些:
 
-- **Reachability** — Vercel's edge is reachable & fast from most networks (incl. behind the GFW, tested via a Vercel-hosted site at ~0.45s). Always go through your **custom domain**; the default `*.vercel.app` may be blocked.
-- **Bandwidth (the main free-tier limit)** — Hobby includes **100 GB/month egress with no overage**; exceeding it *pauses* the project for the rest of the cycle. In `stream` mode every layer byte counts. Mitigations: Docker's local layer cache avoids re-pulls; switch to `BLOB_MODE=redirect` to keep bytes off Vercel (only if your client can reach the CDN).
-- **Rate limiting** — Docker Hub limits anonymous pulls (≈10/hr unauth, more when authenticated) and Vercel egresses from **shared IPs**, so the anonymous bucket can already be exhausted by others. **Set `DOCKER_USERNAME`/`DOCKER_PASSWORD`.** A free Docker PAT has write/delete scope, so use a **dedicated throwaway account that owns no repositories**.
-- **300s function limit** — a single multi-GB layer over a slow link can time out in `stream` mode. Fine for normal images.
-- **`BLOB_MODE=redirect` + containerd clients** — containerd-backed clients (Docker Engine 29+ default) can fail to follow a cross-host `307`. If pulls fail in redirect mode, use `stream`.
-- **Terms** — Hobby is **personal / non-commercial** use only. A high-traffic public mirror can trip Vercel's fair-use policy; for commercial/CI use, upgrade to Pro.
-- **No server-side cache** — this is a stateless proxy, not a caching mirror. Every cold pull is a live upstream round-trip.
+- **可达性** —— Vercel 边缘在多数网络下可达且快(包括墙内,实测一个 Vercel 托管站点约 0.45s)。请始终通过你的**自定义域名**访问;默认的 `*.vercel.app` 可能被墙。
+- **带宽(免费版最主要的限制)** —— Hobby 含**每月 100 GB 出站流量、无超额**;超了会**暂停项目**到下个计费周期。`stream` 模式下每个层字节都算。缓解:Docker 本地层缓存可避免重复拉取;或切到 `BLOB_MODE=redirect` 让字节绕过 Vercel(前提是客户端能直连 CDN)。
+- **限流** —— Docker Hub 对匿名拉取有限制(未认证约 10 次/小时,认证后更高),而 Vercel 从**共享 IP** 出站,匿名额度可能已被别人占满。**请设置 `DOCKER_USERNAME`/`DOCKER_PASSWORD`。** 免费版 PAT 带有写/删权限,所以请用一个**不拥有任何仓库的专用小号**。
+- **300 秒函数上限** —— `stream` 模式下,单个数 GB 的大层在慢网络上可能超时。常规镜像无碍。
+- **`BLOB_MODE=redirect` + containerd 客户端** —— containerd 类客户端(Docker Engine 29+ 默认)可能无法跟随跨主机的 `307`。若 redirect 模式下拉取失败,改用 `stream`。
+- **条款** —— Hobby 仅限**个人/非商业**用途。高流量公开镜像可能触犯 Vercel 的合理使用政策;商用/CI 请升级 Pro。
+- **无服务端缓存** —— 这是无状态代理,不是缓存型镜像源。每次冷拉取都是一次实时回源。
+
+---
+
+为个人 Docker 镜像加速而做。欢迎 PR / issue。
