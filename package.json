@@ -1,0 +1,12 @@
+{
+  "name": "redocker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Docker Hub pull-through mirror on Vercel Edge",
+  "scripts": {
+    "dev": "node local-server.js",
+    "test:flow": "bash test/v2-flow.sh",
+    "test:redirect": "node test/redirect-mode.test.mjs"
+  }
+}
